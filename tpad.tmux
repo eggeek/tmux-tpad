@@ -4,7 +4,7 @@ set -eo pipefail
 # Configuration
 if [[ "$(tmux show-options -gqv @tpad-debug)" == "true" ]]; then
   LOG_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/tpad.log"
-  exec &>>"$LOG_FILE"
+  exec >>"$LOG_FILE" 2>&1
 
   set -x
 fi
@@ -12,14 +12,28 @@ fi
 readonly CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly TPAD_SCRIPT="${CURRENT_DIR}/tpad.tmux"
 
-declare -A DEFAULTS=(
-  [title]="#[fg=magenta,bold] 󱂬 TPad: @instance@ "
-  [dir]="$HOME"
-  [width]="60%"
-  [height]="60%"
-  [style]="fg=blue"
-  [border_style]="fg=cyan,rounded"
-)
+capitalize_first() {
+  local value="$1"
+  local first="${value%"${value#?}"}"
+  local rest="${value#?}"
+
+  printf '%s%s' "$(printf '%s' "$first" | tr '[:lower:]' '[:upper:]')" "$rest"
+}
+
+get_default_config() {
+  local instance="$1"
+  local key="$2"
+
+  case "$key" in
+    title) printf '%s\n' "#[fg=magenta,bold] 󱂬 TPad: $(capitalize_first "$instance") " ;;
+    dir) printf '%s\n' "$HOME" ;;
+    width) printf '%s\n' "60%" ;;
+    height) printf '%s\n' "60%" ;;
+    style) printf '%s\n' "fg=blue" ;;
+    border_style) printf '%s\n' "fg=cyan,rounded" ;;
+    *) printf '%s\n' "" ;;
+  esac
+}
 
 main() {
   check_dependencies
@@ -144,10 +158,10 @@ get_config() {
   local val="$(tmux show-option -gqv "$tmux_var")"
 
   if [[ -z "$val" ]]; then
-    val="${DEFAULTS[$key]/@instance@/${instance^}}"
+    val="$(get_default_config "$instance" "$key")"
   fi
 
-  echo "$val"
+  printf '%s\n' "$val"
 }
 
 bind_key() {
@@ -173,34 +187,39 @@ bind_key() {
   tmux bind-key -T "tpad_$instance" "$key" run-shell "$TPAD_SCRIPT toggle $instance"
 }
 
+popup_config_key() {
+  case "$1" in
+    T) printf '%s\n' "title" ;;
+    S) printf '%s\n' "style" ;;
+    s) printf '%s\n' "border_style" ;;
+    b) printf '%s\n' "border_lines" ;;
+    h) printf '%s\n' "height" ;;
+    w) printf '%s\n' "width" ;;
+    x) printf '%s\n' "pos_x" ;;
+    y) printf '%s\n' "pos_y" ;;
+    d) printf '%s\n' "dir" ;;
+    e) printf '%s\n' "env" ;;
+  esac
+}
+
 build_popup_options() {
   local instance="$1"
   local working_dir="$2"
-  declare -A opt_map=(
-    [T]="title"
-    [S]="style"
-    [s]="border_style"
-    [b]="border_lines"
-    [h]="height"
-    [w]="width"
-    [x]="pos_x"
-    [y]="pos_y"
-    [d]="dir"
-    [e]="env"
-  )
+  local opt key val dir_name
 
-  for opt in "${!opt_map[@]}"; do
-    local val=""
+  for opt in T S s b h w x y d e; do
+    key="$(popup_config_key "$opt")"
+    val=""
     # Use provided working_dir for the dir option if available
     if [[ "$opt" == "d" && -n "$working_dir" ]]; then
       val="$working_dir"
     elif [[ "$opt" == "T" && -n "$working_dir" ]]; then
       # Append directory name to title if per-dir is enabled
-      val="$(get_config "$instance" "${opt_map[$opt]}")"
-      local dir_name="$(basename "$working_dir")"
+      val="$(get_config "$instance" "$key")"
+      dir_name="$(basename "$working_dir")"
       val="${val% } [${dir_name}]  "
     else
-      val="$(get_config "$instance" "${opt_map[$opt]}")"
+      val="$(get_config "$instance" "$key")"
     fi
     if [[ -n "$val" ]]; then
       echo "-${opt}"
