@@ -25,12 +25,12 @@ get_default_config() {
   local key="$2"
 
   case "$key" in
-    title) printf '%s\n' "#[fg=magenta,bold] 󱂬 TPad: $(capitalize_first "$instance") " ;;
+    title) printf '%s\n' "#[fg=#b8aaf0,bold] 󱂬 TPad: $(capitalize_first "$instance") " ;;
     dir) printf '%s\n' "$HOME" ;;
-    width) printf '%s\n' "60%" ;;
-    height) printf '%s\n' "60%" ;;
-    style) printf '%s\n' "fg=blue" ;;
-    border_style) printf '%s\n' "fg=cyan,rounded" ;;
+    width) printf '%s\n' "80%" ;;
+    height) printf '%s\n' "80%" ;;
+    style) printf '%s\n' "fg=#e5c07b" ;;
+    border_lines) printf '%s\n' "rounded" ;;
     *) printf '%s\n' "" ;;
   esac
 }
@@ -57,12 +57,28 @@ initialize_instances() {
 
 toggle_popup() {
   local instance="$1"
+  local current_session="$(tmux display-message -p '#{session_name}')"
+  local current_tpad_instance="$(get_tpad_session_instance "$current_session")"
   local session="tpad_${instance}"
   local working_dir=""
 
-  # Check if per-directory sessions are enabled
+  if [[ "$current_tpad_instance" == "$instance" ]]; then
+    if tmux show-env -g TPAD_ZOOMED 2>/dev/null | grep -q "$current_session"; then
+      tmux setenv -g -u TPAD_ZOOMED
+      switch_to_tpad_parent "$current_session"
+    else
+      tmux detach
+    fi
+    return
+  fi
+
+  # Check if per-window or per-directory sessions are enabled.
+  # per-window takes precedence because it scopes the panel to the origin tab.
+  local per_window="$(get_config "$instance" per-window)"
   local per_dir="$(get_config "$instance" per-dir)"
-  if [[ "$per_dir" == "true" ]]; then
+  if [[ "$per_window" == "true" ]]; then
+    session="$(build_window_scoped_session_name "$instance")"
+  elif [[ "$per_dir" == "true" ]]; then
     local pane_dir="$(tmux display-message -p '#{pane_current_path}')"
     local git_root="$(get_git_root "$pane_dir")"
 
@@ -78,28 +94,18 @@ toggle_popup() {
     fi
   fi
 
-  local current_session="$(tmux display-message -p '#{session_name}')"
-
-  if [[ "$current_session" == "$session" ]]; then
-    if tmux show-env -g TPAD_ZOOMED | grep -q "$session"; then
-      tmux setenv -g -u TPAD_ZOOMED
-      tmux switch-client -t "$(tmux show-env -g TPAD_PARENT_SESSION | cut -d= -f2)"
-    else
-      tmux detach
-    fi
-  else
-    if [[ "$current_session" =~ tpad_* ]]; then
-      tmux detach
-    fi
-    tmux setenv -g TPAD_PARENT_SESSION "$current_session"
-    create_session_if_needed "$instance" "$session" "$working_dir"
-    local popup_opts=()
-    while IFS= read -r opt; do
-      popup_opts+=("$opt")
-    done < <(build_popup_options "$instance" "$working_dir")
-
-    tmux display-popup "${popup_opts[@]}" -E "tmux attach -t $session"
+  if is_tpad_session "$current_session"; then
+    tmux detach
   fi
+  tmux setenv -g TPAD_PARENT_SESSION "$current_session"
+  create_session_if_needed "$instance" "$session" "$working_dir"
+  set_tpad_parent_metadata "$session"
+  local popup_opts=()
+  while IFS= read -r opt; do
+    popup_opts+=("$opt")
+  done < <(build_popup_options "$instance" "$working_dir")
+
+  tmux display-popup "${popup_opts[@]}" -E "tmux attach -t $session"
 }
 
 create_session_if_needed() {
@@ -117,6 +123,8 @@ create_session_if_needed() {
 configure_session() {
   local instance="$1"
   local session_id="$2"
+  tmux set-option -t "$session_id" @tpad-managed "1"
+  tmux set-option -t "$session_id" @tpad-instance "$instance"
   apply_session_config "$instance" "$session_id"
 
   local cmd="$(get_config "$instance" cmd)"
@@ -164,6 +172,98 @@ get_config() {
   printf '%s\n' "$val"
 }
 
+sanitize_session_suffix() {
+  local value="$1"
+  printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -c '[:alnum:]' '_' | sed 's/_*$//; s/^_*//'
+}
+
+is_tpad_session() {
+  local session_name="$1"
+  case "$session_name" in
+    tpad_*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+get_tpad_session_instance() {
+  local session_name="$1"
+  local instance=""
+
+  if is_tpad_session "$session_name"; then
+    instance="$(tmux show-option -t "$session_name" -qv @tpad-instance 2>/dev/null || true)"
+    if [[ -z "$instance" ]]; then
+      instance="${session_name#tpad_}"
+    fi
+  fi
+
+  printf '%s\n' "$instance"
+}
+
+build_window_scoped_session_name() {
+  local instance="$1"
+  local origin="$(tmux display-message -p '#{session_name}_#{window_id}')"
+  printf 'tpad_%s_%s\n' "$instance" "$(sanitize_session_suffix "$origin")"
+}
+
+set_tpad_parent_metadata() {
+  local session="$1"
+  local parent_session="$(tmux display-message -p '#{session_name}')"
+  local parent_window="$(tmux display-message -p '#{window_id}')"
+
+  tmux set-option -t "$session" @tpad-parent-session "$parent_session"
+  tmux set-option -t "$session" @tpad-parent-window "$parent_window"
+}
+
+switch_to_tpad_parent() {
+  local session="$1"
+  local parent_session="$(tmux show-option -t "$session" -qv @tpad-parent-session 2>/dev/null || true)"
+  local parent_window="$(tmux show-option -t "$session" -qv @tpad-parent-window 2>/dev/null || true)"
+
+  if [[ -n "$parent_session" && -n "$parent_window" ]]; then
+    tmux switch-client -t "${parent_session}:${parent_window}"
+  elif [[ -n "$parent_session" ]]; then
+    tmux switch-client -t "$parent_session"
+  else
+    local env_parent="$(tmux show-env -g TPAD_PARENT_SESSION 2>/dev/null | cut -d= -f2 || true)"
+    [[ -n "$env_parent" ]] && tmux switch-client -t "$env_parent"
+  fi
+}
+
+copy_key_binding() {
+  local source_table="$1"
+  local dest_table="$2"
+  local key="$3"
+  local line=""
+  local copied=""
+
+  line="$(tmux list-keys -a | awk -v source="$source_table" -v key="$key" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i == "-T" && $(i + 1) == source && $(i + 2) == key) {
+          print
+          exit
+        }
+      }
+    }
+  ')"
+
+  [[ -z "$line" ]] && return
+  copied="${line/-T $source_table/-T $dest_table}"
+  printf '%s\n' "$copied" | tmux source-file -
+}
+
+bind_configured_root_keys() {
+  local instance="$1"
+  local keys="$(get_config "$instance" copy-root-keys)"
+  local table="tpad_$instance"
+  local key=""
+
+  [[ -z "$keys" ]] && return
+  for key in $keys; do
+    copy_key_binding root "$table" "$key"
+  done
+}
+
 bind_key() {
   local instance="$1"
   local key="$(get_config "$instance" bind)"
@@ -184,6 +284,7 @@ bind_key() {
     tmux bind-key "$key" run-shell "$TPAD_SCRIPT toggle $instance"
   fi
 
+  bind_configured_root_keys "$instance"
   tmux bind-key -T "tpad_$instance" "$key" run-shell "$TPAD_SCRIPT toggle $instance"
 }
 
@@ -253,36 +354,37 @@ sanitize_dir_name() {
 
 toggle_fullscreen() {
   local current_session="$(tmux display-message -p '#{session_name}')"
-  local parent_session="$(tmux show-env -g TPAD_PARENT_SESSION | cut -d= -f2)"
-  local instance="${current_session#tpad_}"
+  local instance="$(get_tpad_session_instance "$current_session")"
 
-  if [[ "$current_session" =~ tpad_* ]]; then
-    local zoomed_session="$(tmux show-env -g TPAD_ZOOMED | cut -d= -f2)"
-    if [[ -n "$zoomed_session" ]]; then
-      # Exiting fullscreen mode - clear fullscreen settings and restore config
-      tmux setenv -g -u TPAD_ZOOMED
-      tmux set -u -t "$current_session" status-left
-      tmux set -u -t "$current_session" status-right
-      tmux set -u -t "$current_session" status-justify
-      tmux set -u -t "$current_session" status-position
-      tmux set -u -t "$current_session" status-style
-      apply_session_config "$instance" "$current_session"
-      tmux switch-client -t "$parent_session"
-      toggle_popup "$instance"
-    else
-      # Entering fullscreen mode
-      tmux setenv -g TPAD_ZOOMED "$current_session"
-      tmux detach
-      tmux switch-client -t "$current_session"
+  if [[ -z "$instance" ]]; then
+    return
+  fi
 
-      local title="$(get_config "$instance" title)"
-      tmux set -t "$current_session" status on
-      tmux set -t "$current_session" status-justify centre
-      tmux set -t "$current_session" status-position top
-      tmux set -t "$current_session" status-left ""
-      tmux set -t "$current_session" status-right "${title} [FULLSCREEN]"
-      tmux set -t "$current_session" status-style "bg=terminal,fg=terminal"
-    fi
+  local zoomed_session="$(tmux show-env -g TPAD_ZOOMED 2>/dev/null | cut -d= -f2 || true)"
+  if [[ "$zoomed_session" == "$current_session" ]]; then
+    # Exiting fullscreen mode - clear fullscreen settings and restore config
+    tmux setenv -g -u TPAD_ZOOMED
+    tmux set -u -t "$current_session" status-left
+    tmux set -u -t "$current_session" status-right
+    tmux set -u -t "$current_session" status-justify
+    tmux set -u -t "$current_session" status-position
+    tmux set -u -t "$current_session" status-style
+    apply_session_config "$instance" "$current_session"
+    switch_to_tpad_parent "$current_session"
+    toggle_popup "$instance"
+  else
+    # Entering fullscreen mode
+    tmux setenv -g TPAD_ZOOMED "$current_session"
+    tmux detach
+    tmux switch-client -t "$current_session"
+
+    local title="$(get_config "$instance" title)"
+    tmux set -t "$current_session" status on
+    tmux set -t "$current_session" status-justify centre
+    tmux set -t "$current_session" status-position top
+    tmux set -t "$current_session" status-left ""
+    tmux set -t "$current_session" status-right "${title} [FULLSCREEN]"
+    tmux set -t "$current_session" status-style "bg=terminal,fg=terminal"
   fi
 }
 

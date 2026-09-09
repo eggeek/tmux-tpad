@@ -11,7 +11,9 @@ A lightweight floating window manager for tmux that allows you to create customi
 - Run specific commands automatically when opening a popup
 - Set custom working directories per popup
 - Support for custom key bindings and tmux prefix keys
+- Copy selected no-prefix/root tmux bindings into tpad sessions
 - Per-directory sessions: create separate sessions for each git repository
+- Per-window sessions: create separate sessions for each origin tmux tab/window
 
 ## Installation
 
@@ -55,15 +57,17 @@ TPad sessions are configured using tmux options in the format: `@tpad-<session_n
 
 ### Behavior Options
 
-| Option  | Default | Description                                                               |
-| ------- | ------- | ------------------------------------------------------------------------- |
-| cmd     |         | Command to execute when popup opens                                       |
-| dir     | $HOME   | Working directory for the session                                         |
-| env     |         | Additional environment variables                                          |
-| opts    |         | Session-specific tmux options (semicolon-separated)                       |
-| per-dir | false   | Create separate sessions per git repository/directory                     |
-| prefix  |         | Custom tmux prefix for the session                                        |
-| table   |         | Key table for the binding (e.g., `root`). Auto-detected for mouse events. |
+| Option         | Default | Description                                                                                                                               |
+| -------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| cmd            |         | Command to execute when popup opens                                                                                                       |
+| dir            | $HOME   | Working directory for the session                                                                                                         |
+| env            |         | Additional environment variables                                                                                                          |
+| opts           |         | Session-specific tmux options (semicolon-separated)                                                                                       |
+| per-dir        | false   | Create separate sessions per git repository/directory                                                                                     |
+| per-window     | false   | Create separate sessions per origin tmux window/tab. Uses stable `window_id`, so renaming or renumbering windows does not create a panel. |
+| copy-root-keys |         | Space-separated keys whose existing `root` table bindings should also be available inside this tpad session.                              |
+| prefix         |         | Custom tmux prefix for the session                                                                                                        |
+| table          |         | Key table for the binding (e.g., `root`). Auto-detected for mouse events.                                                                 |
 
 ## Example Configuration
 
@@ -74,6 +78,14 @@ Here's a comprehensive example showing different use cases:
 set -g @tpad-scratchpad-bind   "C-p"
 set -g @tpad-scratchpad-opts   "status on"
 set -g @tpad-scratchpad-dir    "#{pane_current_path}"
+
+# Current-window panel, no prefix key required
+set -g @tpad-scratchpad-bind       "M-`"
+set -g @tpad-scratchpad-table          "root"
+set -g @tpad-scratchpad-per-window     "true"
+set -g @tpad-scratchpad-copy-root-keys "M-1 M-2 M-3 M-4 M-5 M-6 M-7 M-8 M-9 M-0 M-w M-q M-/ C-z M-s M-v M-t WheelUpPane"
+set -g @tpad-scratchpad-opts           "status off"
+set -g @tpad-scratchpad-dir            "#{pane_current_path}"
 
 # Git management with lazygit (separate session per git repo)
 set -g @tpad-git-bind          "C-g"
@@ -116,6 +128,38 @@ set -g @tpad-quick-table       "root"
 ### Full-screen mode
 
 Full-screen mode can be toggled by pressing the tmux prefix key with <kbd>Ctrl</kbd>+<kbd>f</kbd> from within a tpad session
+
+### Selected root key bindings
+
+TPad sessions use an instance-specific key table such as `tpad_scratchpad`, so normal no-prefix bindings from tmux's `root` table are not inherited automatically. Prefix bindings still work through the tmux `prefix` table.
+
+Use `copy-root-keys` to copy only selected root-table bindings into a tpad session:
+
+```tmux
+set -g @tpad-scratchpad-copy-root-keys "M-1 M-2 M-3 M-4 M-5 M-6 M-7 M-8 M-9 M-0 M-w M-q M-/ C-z M-s M-v M-t WheelUpPane"
+```
+
+`WheelUpPane` enables tmux's normal wheel-to-copy-mode scrolling behavior. Avoid copying broad control keys unless you want tmux to intercept them inside TUIs.
+
+### Per-Window Sessions
+
+When `per-window` is enabled, tmux-tpad creates separate sessions for each origin tmux window/tab. This is useful for a scratchpad or floating file manager that should belong to the current tab instead of being shared globally.
+
+**How it works:**
+
+- Uses the origin tmux session plus stable `window_id` to name the tpad session
+- Reuses the same popup when you return to the same tmux window/tab
+- Creates a different popup when opened from a different tmux window/tab
+- Uses `dir` only when the panel session is first created; reopening does not inject `cd` or mutate a running TUI
+
+**Example:**
+
+```tmux
+set -g @tpad-scratchpad-bind       "M-`"
+set -g @tpad-scratchpad-table      "root"
+set -g @tpad-scratchpad-per-window "true"
+set -g @tpad-scratchpad-dir        "#{pane_current_path}"
+```
 
 ### Per-Directory Sessions
 
