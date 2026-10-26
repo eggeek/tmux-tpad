@@ -12,20 +12,12 @@ fi
 readonly CURRENT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly TPAD_SCRIPT="${CURRENT_DIR}/tpad.tmux"
 
-capitalize_first() {
-  local value="$1"
-  local first="${value%"${value#?}"}"
-  local rest="${value#?}"
-
-  printf '%s%s' "$(printf '%s' "$first" | tr '[:lower:]' '[:upper:]')" "$rest"
-}
-
 get_default_config() {
   local instance="$1"
   local key="$2"
 
   case "$key" in
-    title) printf '%s\n' "#[fg=#b8aaf0,bold] 󱂬 TPad: $(capitalize_first "$instance") " ;;
+    title) printf '%s\n' "#[fg=#b8aaf0,bold] 󱂬 TPad " ;;
     dir) printf '%s\n' "$HOME" ;;
     width) printf '%s\n' "80%" ;;
     height) printf '%s\n' "80%" ;;
@@ -40,6 +32,7 @@ main() {
   case "${1:-}" in
     toggle) toggle_popup "$2" ;;
     fullscreen) toggle_fullscreen ;;
+    cleanup) cleanup_sessions ;;
     "") initialize_instances ;;
     *)
       show_help
@@ -50,6 +43,9 @@ main() {
 
 initialize_instances() {
   tmux bind-key "C-f" run-shell "$TPAD_SCRIPT fullscreen"
+  # Kill per-window pads whose tab is gone. Fixed index keeps reloads idempotent.
+  tmux set-hook -g 'window-unlinked[100]' "run-shell -b \"$TPAD_SCRIPT cleanup >/dev/null 2>&1\""
+  tmux set-hook -g 'session-closed[100]' "run-shell -b \"$TPAD_SCRIPT cleanup >/dev/null 2>&1\""
   tmux show-options -g | awk -v FS="-" '/^@tpad/{ print $2}' | sort -u | while read -r instance; do
     bind_key "$instance"
   done
@@ -58,6 +54,7 @@ initialize_instances() {
 toggle_popup() {
   local instance="$1"
   local current_session="$(tmux display-message -p '#{session_name}')"
+  local current_window="$(tmux display-message -p '#{window_id}')"
   local current_tpad_instance="$(get_tpad_session_instance "$current_session")"
   local session="tpad_${instance}"
   local working_dir=""
@@ -99,13 +96,43 @@ toggle_popup() {
   fi
   tmux setenv -g TPAD_PARENT_SESSION "$current_session"
   create_session_if_needed "$instance" "$session" "$working_dir"
-  set_tpad_parent_metadata "$session"
+  set_tpad_parent_metadata "$session" "$current_session" "$current_window"
+  set_tab_status "$session"
   local popup_opts=()
   while IFS= read -r opt; do
     popup_opts+=("$opt")
   done < <(build_popup_options "$instance" "$working_dir")
 
   tmux display-popup "${popup_opts[@]}" -E "tmux attach -t $session"
+}
+
+# Show a minimal "[1][2*]" tab bar only while the pad has more than one tab.
+set_tab_status() {
+  local session="$1"
+  local status='#{?#{>:#{session_windows},1},on,off}'
+  local hook
+
+  tmux set -t "$session" status-style default
+  tmux set -t "$session" status-format[0] '#[align=centre]#{W:[#{window_index}],[#{window_index}*]}'
+  tmux set -F -t "$session" status "$status"
+  for hook in window-linked window-unlinked; do
+    tmux set-hook -t "$session" "$hook" "set -F status '$status'"
+  done
+}
+
+# Kill per-window pads whose origin tab no longer exists. Their names end in
+# the origin window id (see build_window_scoped_session_name).
+cleanup_sessions() {
+  local windows="$(tmux list-windows -a -F '#{window_id}')"
+  local session instance
+  tmux list-sessions -F '#{session_name}' | while read -r session; do
+    instance="$(get_tpad_session_instance "$session")"
+    [[ -n "$instance" && "$(get_config "$instance" per-window)" == "true" ]] || continue
+    [[ "${session##*_}" =~ ^[0-9]+$ ]] || continue
+    if ! grep -qxF "@${session##*_}" <<<"$windows"; then
+      tmux kill-session -t "=$session" 2>/dev/null || true
+    fi
+  done
 }
 
 create_session_if_needed() {
@@ -207,8 +234,8 @@ build_window_scoped_session_name() {
 
 set_tpad_parent_metadata() {
   local session="$1"
-  local parent_session="$(tmux display-message -p '#{session_name}')"
-  local parent_window="$(tmux display-message -p '#{window_id}')"
+  local parent_session="$2"
+  local parent_window="$3"
 
   tmux set-option -t "$session" @tpad-parent-session "$parent_session"
   tmux set-option -t "$session" @tpad-parent-window "$parent_window"
@@ -375,6 +402,10 @@ toggle_fullscreen() {
   else
     # Entering fullscreen mode
     tmux setenv -g TPAD_ZOOMED "$current_session"
+    # Fullscreen uses the normal status line; the tab bar returns on exit.
+    tmux set-hook -u -t "$current_session" window-linked
+    tmux set-hook -u -t "$current_session" window-unlinked
+    tmux set -u -t "$current_session" status-format
     tmux detach
     tmux switch-client -t "$current_session"
 
@@ -398,6 +429,7 @@ Usage:
 Commands:
   (no command)  Initialize all configured instances
   toggle        Toggle a popup instance
+  cleanup       Kill per-window pads whose tmux tab is gone
 EOF
 }
 
