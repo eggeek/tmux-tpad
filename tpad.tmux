@@ -46,6 +46,12 @@ initialize_instances() {
   # Kill per-window pads whose tab is gone. Fixed index keeps reloads idempotent.
   tmux set-hook -g 'window-unlinked[100]' "run-shell -b \"$TPAD_SCRIPT cleanup >/dev/null 2>&1\""
   tmux set-hook -g 'session-closed[100]' "run-shell -b \"$TPAD_SCRIPT cleanup >/dev/null 2>&1\""
+  # tmux popups never answer the OSC 10/11 colour queries a nested client sends on
+  # attach, so the client holds a lone Esc for 500ms (ignoring escape-time). Give the
+  # popup client its own TERM that tmux treats as non-VT100-like (no queries) and
+  # list the features those queries would have discovered. Fixed index = idempotent.
+  tmux set -s 'terminal-overrides[100]' 'tmux:clear=\E(B\E[H\E[J'
+  tmux set -s 'terminal-features[100]' 'tmux:256:bpaste:ccolour:clipboard:hyperlinks:cstyle:extkeys:focus:mouse:overline:progressbar:RGB:strikethrough:sync:title:usstyle'
   tmux show-options -g | awk -v FS="-" '/^@tpad/{ print $2}' | sort -u | while read -r instance; do
     bind_key "$instance"
   done
@@ -103,7 +109,7 @@ toggle_popup() {
     popup_opts+=("$opt")
   done < <(build_popup_options "$instance" "$working_dir")
 
-  tmux display-popup "${popup_opts[@]}" -E "tmux attach -t $session"
+  tmux display-popup -e TERM=tmux "${popup_opts[@]}" -E "tmux attach -t $session"
 }
 
 # Show a minimal "[1][2*]" tab bar only while the pad has more than one tab.
